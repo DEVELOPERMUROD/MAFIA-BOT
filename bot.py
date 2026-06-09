@@ -26,9 +26,11 @@ from telegram.error import Forbidden, BadRequest
 
 from game import (
     Game, games, find_game_by_user,
-    get_profile, update_profile, get_lang, set_lang, role_counts
+    get_profile, update_profile, get_lang, set_lang, role_counts,
+    load_profiles, save_profiles
 )
 from lang import t, role_info
+from admin import is_admin, BOT_ENABLED
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -641,6 +643,88 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await maybe_end_night(g, ctx)
         return
 
+# ── /admin ────────────────────────────────────────────────────────────────────
+
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("❌ Siz admin emassiz.")
+        return
+
+    profiles = load_profiles()
+    total_users = len(profiles)
+    total_games = sum(p.get("games", 0) for p in profiles.values())
+    active = len(games)
+    bot_status = "🟢 Yoqiq" if BOT_ENABLED["value"] else "🔴 O'chiq"
+
+    web_token = os.environ.get("ADMIN_WEB_TOKEN", "admin123")
+    web_port = os.environ.get("PORT", "8080")
+
+    text = (
+        f"🛡️ <b>Admin Panel</b>\n\n"
+        f"🤖 Bot: {bot_status}\n"
+        f"👤 Foydalanuvchilar: <b>{total_users}</b>\n"
+        f"🎮 O'ynalgan o'yinlar: <b>{total_games}</b>\n"
+        f"🔴 Faol o'yinlar: <b>{active}</b>\n\n"
+        f"🌐 Web panel: port <code>{web_port}</code>\n"
+        f"🔑 Token: <code>{web_token}</code>"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🟢 Botni yoq", callback_data="adm:bot_on"),
+            InlineKeyboardButton("🔴 Botni o'chir", callback_data="adm:bot_off"),
+        ],
+        [InlineKeyboardButton("🗑️ Faol o'yinlarni tozala", callback_data="adm:clear")],
+        [InlineKeyboardButton("📊 Statistika", callback_data="adm:stats")],
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = q.from_user.id
+    if not is_admin(uid):
+        await q.answer("❌ Ruxsat yo'q!", show_alert=True)
+        return
+
+    data = q.data
+    if data == "adm:bot_on":
+        BOT_ENABLED["value"] = True
+        await q.answer("✅ Bot yoqildi!")
+    elif data == "adm:bot_off":
+        BOT_ENABLED["value"] = False
+        await q.answer("🔴 Bot o'chirildi!")
+    elif data == "adm:clear":
+        count = len(games)
+        games.clear()
+        await q.answer(f"🗑️ {count} ta o'yin tozalandi!")
+    elif data == "adm:stats":
+        profiles = load_profiles()
+        top = sorted(profiles.items(), key=lambda x: x[1].get("wins", 0), reverse=True)[:5]
+        lines = "\n".join(
+            f"{i+1}. ID:{uid} — {p.get('wins',0)}🏆 {p.get('games',0)}🎮"
+            for i, (uid, p) in enumerate(top)
+        )
+        await q.answer()
+        await q.message.reply_text(
+            f"📊 Top 5 oyinchi:\n\n{lines or 'Malumot yoq'}",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    await cmd_admin(q, ctx)
+
+
+# ── Botni bloklash (bot off bo'lganda) ────────────────────────────────────────
+
+async def check_bot_enabled(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not BOT_ENABLED["value"]:
+        if update.message:
+            await update.message.reply_text("🔴 Bot hozir o'chirilgan.")
+        return False
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -659,10 +743,12 @@ def main():
     app.add_handler(CommandHandler("lang",     cmd_lang))
     app.add_handler(CommandHandler("vote",     cmd_vote))
     app.add_handler(CommandHandler("endvote",  cmd_endvote))
+    app.add_handler(CommandHandler("admin",    cmd_admin))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^adm:"))
     app.add_handler(CallbackQueryHandler(on_callback))
 
     print("🎭 Mafia boti ishga tushdi!")
-    print("Buyruqlar: /game /roles /profile /lang /cancel /vote /endvote")
+    print("Buyruqlar: /game /roles /profile /lang /cancel /vote /endvote /admin")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
